@@ -6,12 +6,16 @@ import configparser
 import getpass
 import json
 import os
+import shutil
+import stat
 import sys
+import tempfile
 import urllib.request
 import urllib.error
 
 CONFIG_PATH = os.path.expanduser("~/.config/k-shell/config")
 TYPES = ("error", "warn", "info", "success", "log")
+UPDATE_URL = "https://raw.githubusercontent.com/Klick3R-1/k-shell-sender/main/k-shell-sender"
 
 
 def load_config():
@@ -56,6 +60,35 @@ def api_post(url, path, payload, token=None):
 
 def has_ansi(text):
     return "\x1b[" in text
+
+
+def cmd_update(_args):
+    self_path = os.path.realpath(sys.argv[0])
+    print(f"Updating {self_path} from GitHub...")
+    try:
+        with urllib.request.urlopen(UPDATE_URL) as resp:
+            new_content = resp.read()
+    except urllib.error.URLError as e:
+        print(f"Download failed: {e.reason}", file=sys.stderr)
+        sys.exit(1)
+
+    # Write to a temp file next to the target, then atomic replace
+    target_dir = os.path.dirname(self_path)
+    try:
+        fd, tmp_path = tempfile.mkstemp(dir=target_dir)
+        try:
+            os.write(fd, new_content)
+            os.close(fd)
+            os.chmod(tmp_path, os.stat(self_path).st_mode | stat.S_IEXEC)
+            shutil.move(tmp_path, self_path)
+        except Exception:
+            os.unlink(tmp_path)
+            raise
+    except PermissionError:
+        print(f"Permission denied. Try: sudo k-shell-sender update", file=sys.stderr)
+        sys.exit(1)
+
+    print("Done.")
 
 
 def cmd_register(args):
@@ -125,6 +158,8 @@ def main():
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
+    sub.add_parser("update", help="Update k-shell-sender to the latest version.")
+
     reg = sub.add_parser("register", help="Register this machine with K-Shell.")
     reg.add_argument("name", help="Name for this machine (e.g. nas, workstation)")
 
@@ -139,7 +174,9 @@ def main():
 
     args = parser.parse_args()
 
-    if args.cmd == "register":
+    if args.cmd == "update":
+        cmd_update(args)
+    elif args.cmd == "register":
         cmd_register(args)
     else:
         cmd_send(args)
