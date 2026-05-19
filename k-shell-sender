@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""k-shell-sender — send messages to a K-Shell feed instance."""
+
+import argparse
+import configparser
+import getpass
+import json
+import os
+import sys
+import urllib.request
+import urllib.error
+
+CONFIG_PATH = os.path.expanduser("~/.config/k-shell/config")
+TYPES = ("error", "warn", "info", "success", "log")
+
+
+def load_config():
+    cfg = configparser.ConfigParser()
+    if os.path.exists(CONFIG_PATH):
+        cfg.read(CONFIG_PATH)
+    return cfg
+
+
+def save_config(url, name, token):
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    cfg = configparser.ConfigParser()
+    cfg["default"] = {"url": url, "name": name, "token": token}
+    with open(CONFIG_PATH, "w") as f:
+        cfg.write(f)
+    os.chmod(CONFIG_PATH, 0o600)
+
+
+def api_post(url, path, payload, token=None):
+    data = json.dumps(payload).encode()
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(
+        url.rstrip("/") + path, data=data, headers=headers, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        try:
+            msg = json.loads(body).get("error", body)
+        except Exception:
+            msg = body
+        print(f"Error {e.code}: {msg}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"Connection failed: {e.reason}", file=sys.stderr)
+        sys.exit(1)
+
+
+def has_ansi(text):
+    return "\x1b[" in text
+
+
+def cmd_register(args):
+    cfg = load_config()
+    default_url = cfg.get("default", "url", fallback="")
+
+    prompt = f"K-Shell URL [{default_url}]: " if default_url else "K-Shell URL (e.g. http://192.168.1.10:8080): "
+    url = input(prompt).strip().rstrip("/") or default_url
+
+    if not url:
+        print("URL is required.", file=sys.stderr)
+        sys.exit(1)
+
+    password = getpass.getpass("Registration password: ")
+
+    resp = api_post(url, "/api/register", {"name": args.name, "password": password})
+    save_config(url, args.name, resp["token"])
+    print(f"Registered '{args.name}'. Config saved to {CONFIG_PATH}")
+
+
+def cmd_send(args):
+    cfg = load_config()
+    if "default" not in cfg:
+        print("Not registered. Run: k-shell-sender register <name>", file=sys.stderr)
+        sys.exit(1)
+
+    section = cfg["default"]
+    url = section["url"]
+    token = section["token"]
+
+    if not sys.stdin.isatty():
+        body = sys.stdin.read()
+    elif args.body:
+        body = args.body
+    else:
+        print("Provide a message body or pipe input.", file=sys.stderr)
+        sys.exit(1)
+
+    if not body.strip():
+        sys.exit(0)
+
+    payload = {
+        "type": args.type,
+        "body": body,
+        "has_ansi": has_ansi(body),
+    }
+    if args.tag:
+        payload["tag"] = args.tag
+    if args.schema:
+        payload["schema"] = args.schema
+
+    api_post(url, "/api/feed", payload, token=token)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="k-shell-sender",
+        description="Send messages to a K-Shell feed.",
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    reg = sub.add_parser("register", help="Register this machine with K-Shell.")
+    reg.add_argument("name", help="Name for this machine (e.g. nas, workstation)")
+
+    for t in TYPES:
+        p = sub.add_parser(t, help=f"Send a {t} message.")
+        p.add_argument("body", nargs="?", help="Message body (omit to read from stdin)")
+        p.add_argument("--tag", help="Tag label, e.g. nginx, backup")
+        p.add_argument("--schema", help="Coloring schema hint, e.g. syslog, journalctl")
+        p.set_defaults(type=t)
+
+    args = parser.parse_args()
+
+    if args.cmd == "register":
+        cmd_register(args)
+    else:
+        cmd_send(args)
+
+
+if __name__ == "__main__":
+    main()
