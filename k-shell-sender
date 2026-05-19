@@ -86,28 +86,36 @@ def cmd_send(args):
     url = section["url"]
     token = section["token"]
 
+    def send(body):
+        if not body.strip():
+            return
+        payload = {
+            "type": args.type,
+            "body": body,
+            "has_ansi": has_ansi(body),
+        }
+        if args.tag:
+            payload["tag"] = args.tag
+        if args.schema:
+            payload["schema"] = args.schema
+        api_post(url, "/api/feed", payload, token=token)
+
     if not sys.stdin.isatty():
-        body = sys.stdin.read()
+        if args.live:
+            # Line-by-line for continuous streams (journalctl -f, tail -f, etc.)
+            try:
+                for line in sys.stdin:
+                    send(line.rstrip("\n"))
+            except KeyboardInterrupt:
+                pass
+        else:
+            # Buffer all stdin for scripts that terminate
+            send(sys.stdin.read())
     elif args.body:
-        body = args.body
+        send(args.body)
     else:
         print("Provide a message body or pipe input.", file=sys.stderr)
         sys.exit(1)
-
-    if not body.strip():
-        sys.exit(0)
-
-    payload = {
-        "type": args.type,
-        "body": body,
-        "has_ansi": has_ansi(body),
-    }
-    if args.tag:
-        payload["tag"] = args.tag
-    if args.schema:
-        payload["schema"] = args.schema
-
-    api_post(url, "/api/feed", payload, token=token)
 
 
 def main():
@@ -125,6 +133,8 @@ def main():
         p.add_argument("body", nargs="?", help="Message body (omit to read from stdin)")
         p.add_argument("--tag", help="Tag label, e.g. nginx, backup")
         p.add_argument("--schema", help="Coloring schema hint, e.g. syslog, journalctl")
+        p.add_argument("--live", action="store_true",
+                       help="Send each line immediately (for continuous streams like journalctl -f)")
         p.set_defaults(type=t)
 
     args = parser.parse_args()
